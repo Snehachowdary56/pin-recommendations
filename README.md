@@ -89,6 +89,15 @@ correct if it shares the query's class. Compared with raw pixels and with the sa
 It downloads images and weights, so it runs in the `visual-search` GitHub Actions workflow; results are in
 [`results/VISUAL_SEARCH.md`](results/VISUAL_SEARCH.md).
 
+| Embedding | Precision@10 | Mean average precision |
+|---|---|---|
+| Raw pixels | 0.242 | 0.152 |
+| ResNet-18, random weights | 0.223 | 0.144 |
+| **ResNet-18, pretrained on ImageNet** | **0.633** | **0.391** |
+
+Pretrained features find a same-class image 2.6 times as often as raw pixels (chance is 10%); the untrained network
+is no better than pixels, so the gain is what the network learned, not its architecture.
+
 ## MLflow
 
 Every run logs its parameters (model, embedding size, layers, epochs, learning rate, candidate counts, features)

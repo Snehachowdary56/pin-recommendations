@@ -115,6 +115,7 @@ def main():
     lines += ["", f"Hardest classes: {worst[0]} and {worst[1]}, which look alike at 32 x 32 pixels.",
               "The pretrained network was never trained on CIFAR-10; its ImageNet features transfer.", ""]
     (out / "VISUAL_SEARCH.md").write_text("\n".join(lines))
+    print("\n".join(lines))   # also in the job log
 
 
 if __name__ == "__main__":
