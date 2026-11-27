@@ -97,3 +97,61 @@ def test_end_to_end_small(tmp_path):
     assert r["lightgcn"]["cold_start_recall_at_20"] == 0
     assert (tmp_path / "results" / "RESULTS.md").exists()
     assert (tmp_path / "mlflow.db").exists()
+
+
+# ---------- ads ----------
+from pinrec import ads  # noqa: E402
+
+
+def test_true_ctr_has_position_bias_and_relevance():
+    p1 = ads.true_ctr(np.array([1.0]), np.array([0.0]), np.array([1]))
+    p4 = ads.true_ctr(np.array([1.0]), np.array([0.0]), np.array([4]))
+    p_irrelevant = ads.true_ctr(np.array([0.0]), np.array([0.0]), np.array([1]))
+    assert p1 > p4 and p1 > p_irrelevant
+
+
+def test_ctr_metrics_known_values():
+    y = np.array([0, 0, 1, 1])
+    m = ads.ctr_metrics(y, np.array([0.1, 0.2, 0.8, 0.9]), bins=2)
+    assert m["auc"] == 1.0
+    assert m["ece"] == pytest.approx(0.15)
+
+
+def test_ads_end_to_end(ds):
+    torch.manual_seed(0)
+    lg = models.LightGCN(ds.n_users, ds.n_pins, models.normalized_adjacency(ds))
+    models.train_bpr(lg, ds, epochs=3)
+    with torch.no_grad():
+        u, p = lg.embeddings()
+        g = (u @ p.T).numpy()
+    r = ads.run(ds, g, pd.concat([ds.train, ds.valid]))
+    assert r["neural_net"]["auc"] > 0.65
+    assert r["neural_net"]["ece"] < 0.01                         # calibrated
+    assert r["ctr_by_position"][1] > r["ctr_by_position"][4]     # position bias visible
+    au = r["auction"].set_index("rule")
+    assert au.loc["bid x predicted CTR", "revenue_per_1000"] > au.loc["bid only", "revenue_per_1000"]
+    assert au.loc["bid x predicted CTR", "relevant_share"] > au.loc["bid only", "relevant_share"]
+
+
+# ---------- TensorFlow ranker ----------
+def test_tensorflow_ranker_learns():
+    pytest.importorskip("tensorflow")
+    from pinrec import tf_ranker
+    rng = np.random.default_rng(0)
+    n = 4000
+    df = pd.DataFrame({"user_id": rng.integers(0, 50, n), "pin_id": np.arange(n), **{f: rng.normal(size=n) for f in rank.FEATURES}})
+    labels = df[df["graph_score"] > 1.2][["user_id", "pin_id"]]
+    m = tf_ranker.fit(df, labels, epochs=5)
+    s = m.predict(df[rank.FEATURES].to_numpy(np.float32), verbose=0).ravel()
+    assert s[df["graph_score"] > 1.2].mean() > s[df["graph_score"] < 0].mean()
+
+
+# ---------- visual search evaluation (no download needed) ----------
+def test_visual_search_metrics():
+    pytest.importorskip("torchvision")
+    from scripts.visual_search import evaluate
+    labels = np.repeat([0, 1], 20)
+    perfect = np.eye(2)[labels] + np.random.default_rng(0).normal(0, 0.01, (40, 2))
+    assert evaluate(perfect, labels)["precision_at_10"] == 1.0
+    noise = np.random.default_rng(1).normal(size=(40, 8))
+    assert evaluate(noise, labels)["precision_at_10"] < 0.8

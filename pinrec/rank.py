@@ -88,6 +88,10 @@ def rank(model, norm, df: pd.DataFrame, n_users: int, k: int, fresh_slots: int =
     mu, sd = norm
     with torch.no_grad():
         s = model(torch.tensor((df[FEATURES].to_numpy(dtype=np.float32) - mu) / sd)).numpy()
+    return top_from_scores(df, s, n_users, k, fresh_slots)
+
+
+def top_from_scores(df: pd.DataFrame, s: np.ndarray, n_users: int, k: int, fresh_slots: int = 0) -> np.ndarray:
     df = df.assign(score=s).sort_values(["user_id", "score"], ascending=[True, False])
     out = np.zeros((n_users, k), dtype=int)
     for u, g in df.groupby("user_id"):

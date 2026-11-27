@@ -10,6 +10,7 @@ jobs:
           python-version: "3.12"
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -r requirements.txt
+      - run: pip install tensorflow-cpu torchvision --extra-index-url https://download.pytorch.org/whl/cpu
       - run: pytest -q
       - run: python -m pinrec
       - uses: actions/upload-artifact@v4

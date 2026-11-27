@@ -1,0 +1,22 @@
+name: visual-search
+on:
+  push:
+    paths: ["scripts/visual_search.py", ".github/workflows/visual-search.yml"]
+  workflow_dispatch:
+jobs:
+  visual-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install numpy
+      - run: python scripts/visual_search.py --n-per-class 200
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visual-search-results
+          path: |
+            results/VISUAL_SEARCH.md
+            results/visual_search.json

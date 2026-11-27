@@ -13,14 +13,14 @@ Another 8% of older pins are hidden from the graph during training so the ranker
 | Content: pin title embeddings | 0.043 | 0.027 | 0.036 | 88.6% |
 | Two-stage, graph candidates only (ablation) | 0.189 | 0.153 | 0.000 | 13.9% |
 | Two-stage: graph + fresh-pin candidates → neural ranker | 0.189 | 0.153 | 0.000 | 15.6% |
-| **Two-stage ranker + 3 of 20 slots for fresh pins** | 0.185 | 0.151 | 0.044 | 29.5% |
+| **Two-stage ranker + 3 of 20 slots for fresh pins** | 0.185 | 0.151 | 0.045 | 29.1% |
 
 - Graph propagation helps: LightGCN beats plain matrix factorization (recall@20 0.176 vs 0.140).
 - The two-stage system (LightGCN + fresh-pin candidates, then a neural ranker with graph, text, topic and popularity
   features) beats LightGCN alone: recall@20 0.189 vs 0.176, NDCG@20 0.153 vs 0.142.
 - Graph-only models never recommend a new pin (cold-start recall 0), and even the ranker keeps new pins out of the
   top 20 because established pins score higher. Reserving 3 of 20 slots for the best fresh pins raises cold-start
-  recall to 0.044 and catalog coverage from 15.6% to 29.5%, for a small cost in
+  recall to 0.045 and catalog coverage from 15.6% to 29.1%, for a small cost in
   overall recall (0.189 → 0.185). That is a product decision (fresh content vs short-term accuracy),
   best settled with an online A/B test.
 - Limit: pin titles here only reveal the topic, so the content model cannot tell which new pin in a topic a user
@@ -28,5 +28,39 @@ Another 8% of older pins are hidden from the graph during training so the ranker
 - Stage 1 keeps 63.2% of test saves among about 250 candidates per user; stage 2 orders them.
 - Ranker training data: 0.75% of validation candidates were positives (class weighting used).
 - BPR loss, last epoch: MF 0.065, LightGCN 0.067.
+
+## Same ranker in TensorFlow / Keras
+
+| Framework | Recall@20 | NDCG@20 |
+|---|---|---|
+| PyTorch | 0.189 | 0.153 |
+| TensorFlow / Keras | 0.188 | 0.153 |
+
+Same features, layers and class weighting; the results agree, so the gain comes from the features, not the framework.
+
+## Ads: click-through rate (CTR) prediction and auction
+
+54,000 training and 30,000 test ad impressions, average CTR 1.69%.
+
+| CTR model | AUC | Log loss | Calibration error (ECE) |
+|---|---|---|---|
+| Average CTR (baseline) | 0.500 | 0.0842 | 0.0004 |
+| Logistic regression (PyTorch) | 0.778 | 0.0754 | 0.0043 |
+| Neural network (PyTorch) | 0.801 | 0.0720 | 0.0024 |
+
+- Position bias: actual CTR is 2.47% in slot 1 and 1.14% in slot 4 for the same pool of ads. The model
+  learns position as a feature and predicts every ad at slot 1 for the auction, so ads are compared fairly.
+- Calibration: across predicted-CTR deciles the neural net's predictions track actual CTR (`ads_reliability.csv`).
+  An auction multiplies bids by predicted CTR, so a model that ranks well but is mis-calibrated would misprice ads.
+
+| Auction rule (1 slot, 30 candidate ads) | Clicks per 1,000 requests | Revenue per 1,000 requests (CAD) | Ad matches user interests |
+|---|---|---|---|
+| bid only | 19.8 | 50.1 | 10% |
+| predicted CTR only | 163.2 | 119.7 | 86% |
+| bid x predicted CTR | 134.6 | 143.5 | 77% |
+
+Ranking by bid alone shows the highest-paying ads, which users rarely want. Ranking by bid x predicted CTR earns the
+most (143 vs 50 CAD per 1,000 requests) and still shows a relevant ad 77% of the time.
+Revenue uses the bid times the true click chance (a simplification of a real second-price auction).
 
 Every run is tracked in MLflow (`mlflow.db`; open with `mlflow ui --backend-store-uri sqlite:///mlflow.db`): parameters, metrics and training time.

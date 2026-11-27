@@ -14,7 +14,7 @@ import torch
 
 torch.set_num_threads(4)
 
-from . import data, models, rank
+from . import ads, data, models, rank
 from . import evaluate as ev
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,11 +107,30 @@ def run(out: Path = ROOT / "results", tracking: Path = ROOT / "mlflow.db", epoch
     m3["candidate_recall"] = cand_recall
     log("two_stage_ranker_fresh_slots", {"model": "two-stage ranker + 3 of 20 slots for fresh pins", "fresh_slots": 3}, m3, 0.0)
 
-    write(out, ds, results, mf_loss, lg_loss, pos_rate)
-    return results
+    # TensorFlow / Keras version of the same ranker
+    extra = {}
+    try:
+        from . import tf_ranker
+        t = time.time()
+        tfm = tf_ranker.fit(fv, ds.valid)
+        mt = ev.metrics(tf_ranker.rank(tfm, ft, ds.n_users, K), ds.test, new, ds.n_pins)
+        log("two_stage_ranker_tensorflow", {"model": "same ranker in TensorFlow/Keras"}, mt, round(time.time() - t, 1))
+    except ImportError:
+        pass
+
+    # Ads: CTR prediction, calibration and auction
+    a = ads.run(ds, graph, hist)
+    for name in ("average_ctr", "logistic_regression", "neural_net"):
+        with mlflow.start_run(run_name=f"ads_ctr_{name}"):
+            mlflow.log_params({"task": "ads CTR", "model": name, "features": ",".join(ads.FEATURES)})
+            mlflow.log_metrics(a[name])
+    extra["ads"] = a
+
+    write(out, ds, results, mf_loss, lg_loss, pos_rate, extra)
+    return {**results, **extra}
 
 
-def write(out: Path, ds, r: dict, mf_loss, lg_loss, pos_rate) -> None:
+def write(out: Path, ds, r: dict, mf_loss, lg_loss, pos_rate, extra: dict | None = None) -> None:
     order = ["popularity", "matrix_factorization", "lightgcn", "content_text", "two_stage_graph_candidates_only", "two_stage_ranker", "two_stage_ranker_fresh_slots"]
     label = {"popularity": "Popularity baseline", "matrix_factorization": "Matrix factorization (BPR)",
              "lightgcn": "LightGCN, 2 layers (graph-based)", "content_text": "Content: pin title embeddings",
@@ -122,6 +141,47 @@ def write(out: Path, ds, r: dict, mf_loss, lg_loss, pos_rate) -> None:
         f"| {label[k]} | {r[k][f'recall_at_{K}']:.3f} | {r[k][f'ndcg_at_{K}']:.3f} | {r[k][f'cold_start_recall_at_{K}']:.3f} | {r[k]['catalog_coverage']:.1%} |"
         for k in order)
     two, lg = r["two_stage_ranker_fresh_slots"], r["lightgcn"]
+    tf_section, ads_section = "", ""
+    if "two_stage_ranker_tensorflow" in r:
+        tr_ = r["two_stage_ranker_tensorflow"]
+        tf_section = f"""## Same ranker in TensorFlow / Keras
+
+| Framework | Recall@{K} | NDCG@{K} |
+|---|---|---|
+| PyTorch | {r['two_stage_ranker'][f'recall_at_{K}']:.3f} | {r['two_stage_ranker'][f'ndcg_at_{K}']:.3f} |
+| TensorFlow / Keras | {tr_[f'recall_at_{K}']:.3f} | {tr_[f'ndcg_at_{K}']:.3f} |
+
+Same features, layers and class weighting; the results agree, so the gain comes from the features, not the framework.
+
+"""
+    if extra and "ads" in extra:
+        a = extra["ads"]
+        rows_ = "\n".join(f"| {lab_} | {a[k_]['auc']:.3f} | {a[k_]['log_loss']:.4f} | {a[k_]['ece']:.4f} |" for k_, lab_ in
+                          (("average_ctr", "Average CTR (baseline)"), ("logistic_regression", "Logistic regression (PyTorch)"), ("neural_net", "Neural network (PyTorch)")))
+        au = a["auction"].set_index("rule")
+        pos_ = a["ctr_by_position"]
+        ads_section = f"""## Ads: click-through rate (CTR) prediction and auction
+
+{a['impressions_train']:,} training and {a['impressions_test']:,} test ad impressions, average CTR {a['base_ctr']:.2%}.
+
+| CTR model | AUC | Log loss | Calibration error (ECE) |
+|---|---|---|---|
+{rows_}
+
+- Position bias: actual CTR is {pos_[1]:.2%} in slot 1 and {pos_[4]:.2%} in slot 4 for the same pool of ads. The model
+  learns position as a feature and predicts every ad at slot 1 for the auction, so ads are compared fairly.
+- Calibration: across predicted-CTR deciles the neural net's predictions track actual CTR (`ads_reliability.csv`).
+  An auction multiplies bids by predicted CTR, so a model that ranks well but is mis-calibrated would misprice ads.
+
+| Auction rule (1 slot, 30 candidate ads) | Clicks per 1,000 requests | Revenue per 1,000 requests (CAD) | Ad matches user interests |
+|---|---|---|---|
+""" + "\n".join(f"| {k_} | {v_.clicks_per_1000:.1f} | {v_.revenue_per_1000:.1f} | {v_.relevant_share:.0%} |" for k_, v_ in au.iterrows()) + f"""
+
+Ranking by bid alone shows the highest-paying ads, which users rarely want. Ranking by bid x predicted CTR earns the
+most ({au.loc['bid x predicted CTR', 'revenue_per_1000']:.0f} vs {au.loc['bid only', 'revenue_per_1000']:.0f} CAD per 1,000 requests) and still shows a relevant ad {au.loc['bid x predicted CTR', 'relevant_share']:.0%} of the time.
+Revenue uses the bid times the true click chance (a simplification of a real second-price auction).
+
+"""
     text = f"""# Results (generated sample data)
 
 {ds.n_users:,} users, {ds.n_pins:,} pins in 24 topics, {len(ds.train) + len(ds.valid) + len(ds.test):,} saves.
@@ -146,9 +206,13 @@ Temporal split per user: first 70% train, next 10% validation (trains the ranker
 - Ranker training data: {pos_rate:.2%} of validation candidates were positives (class weighting used).
 - BPR loss, last epoch: MF {mf_loss[-1]:.3f}, LightGCN {lg_loss[-1]:.3f}.
 
-Every run is tracked in MLflow (`mlflow.db`; open with `mlflow ui --backend-store-uri sqlite:///mlflow.db`): parameters, metrics and training time.
+{tf_section}{ads_section}Every run is tracked in MLflow (`mlflow.db`; open with `mlflow ui --backend-store-uri sqlite:///mlflow.db`): parameters, metrics and training time.
 """
     (out / "RESULTS.md").write_text(text, encoding="utf-8")
+    pd.DataFrame(r).T.to_csv(out / "metrics.csv")
+    if extra and "ads" in extra:
+        extra["ads"]["reliability"].to_csv(out / "ads_reliability.csv", index=False)
+        extra["ads"]["auction"].to_csv(out / "ads_auction.csv", index=False)
     pd.DataFrame(r).T.to_csv(out / "metrics.csv")
 
 
